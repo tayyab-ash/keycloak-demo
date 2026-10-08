@@ -4,13 +4,20 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { resolve4 } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import nodemailer, { type Transporter } from 'nodemailer';
 import type { UserRole } from '../../generated/prisma/client';
 
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
-  private readonly transporter: Transporter | null;
+  private readonly smtp: {
+    host: string;
+    port: number;
+    user: string;
+    pass: string;
+  } | null = null;
   private readonly from: string;
   private readonly appUrl: string;
 
@@ -28,18 +35,25 @@ export class MailService {
       this.configService.get<string>('APP_URL') ?? 'http://localhost:5173';
 
     if (!user || !pass) {
-      this.transporter = null;
       this.logger.warn(
         'SMTP_USER / SMTP_PASS are not set. Invitation emails will not be sent.',
       );
       return;
     }
 
-    this.transporter = nodemailer.createTransport({
-      host,
+    this.smtp = { host, port, user, pass };
+  }
+
+  private async createTransporter(): Promise<Transporter> {
+    const { host, port, user, pass } = this.smtp!;
+    const [ipv4] = isIP(host) ? [host] : await resolve4(host);
+
+    return nodemailer.createTransport({
+      host: ipv4,
       port,
       secure: port === 465,
       auth: { user, pass },
+      tls: { servername: host },
     });
   }
 
@@ -88,14 +102,16 @@ export class MailService {
     text: string,
     html: string,
   ): Promise<void> {
-    if (!this.transporter) {
+    if (!this.smtp) {
       throw new ServiceUnavailableException(
         'Mail is not configured. Set SMTP_USER and SMTP_PASS.',
       );
     }
 
+    let transporter: Transporter | undefined;
     try {
-      await this.transporter.sendMail({
+      transporter = await this.createTransporter();
+      await transporter.sendMail({
         from: this.from,
         to,
         subject,
@@ -107,6 +123,8 @@ export class MailService {
       throw new ServiceUnavailableException(
         'The invitation email could not be sent. Try again or check SMTP settings.',
       );
+    } finally {
+      transporter?.close();
     }
   }
 
