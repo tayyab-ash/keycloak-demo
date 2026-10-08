@@ -4,57 +4,30 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { resolve4 } from 'node:dns/promises';
-import { isIP } from 'node:net';
-import nodemailer, { type Transporter } from 'nodemailer';
+import { Resend } from 'resend';
 import type { UserRole } from '../../generated/prisma/client';
 
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
-  private readonly smtp: {
-    host: string;
-    port: number;
-    user: string;
-    pass: string;
-  } | null = null;
-  private readonly from: string;
+  private readonly resend: Resend | null = null;
+  private readonly from: string | undefined;
   private readonly appUrl: string;
 
   constructor(private readonly configService: ConfigService) {
-    const host =
-      this.configService.get<string>('SMTP_HOST') ?? 'smtp.gmail.com';
-    const port = Number(this.configService.get<string>('SMTP_PORT') ?? 465);
-    const user = this.configService.get<string>('SMTP_USER');
-    const pass = this.configService.get<string>('SMTP_PASS');
-    this.from =
-      this.configService.get<string>('MAIL_FROM') ??
-      user ??
-      'noreply@localhost';
+    const apiKey = this.configService.get<string>('RESEND_API_KEY');
+    this.from = this.configService.get<string>('MAIL_FROM');
     this.appUrl =
       this.configService.get<string>('APP_URL') ?? 'http://localhost:5173';
 
-    if (!user || !pass) {
+    if (!apiKey || !this.from) {
       this.logger.warn(
-        'SMTP_USER / SMTP_PASS are not set. Invitation emails will not be sent.',
+        'RESEND_API_KEY / MAIL_FROM are not set. Invitation emails will not be sent.',
       );
       return;
     }
 
-    this.smtp = { host, port, user, pass };
-  }
-
-  private async createTransporter(): Promise<Transporter> {
-    const { host, port, user, pass } = this.smtp!;
-    const [ipv4] = isIP(host) ? [host] : await resolve4(host);
-
-    return nodemailer.createTransport({
-      host: ipv4,
-      port,
-      secure: port === 465,
-      auth: { user, pass },
-      tls: { servername: host },
-    });
+    this.resend = new Resend(apiKey);
   }
 
   async sendInvite(params: {
@@ -102,29 +75,30 @@ export class MailService {
     text: string,
     html: string,
   ): Promise<void> {
-    if (!this.smtp) {
+    if (!this.resend || !this.from) {
       throw new ServiceUnavailableException(
-        'Mail is not configured. Set SMTP_USER and SMTP_PASS.',
+        'Mail is not configured. Set RESEND_API_KEY and MAIL_FROM.',
       );
     }
 
-    let transporter: Transporter | undefined;
+    let error: unknown;
     try {
-      transporter = await this.createTransporter();
-      await transporter.sendMail({
+      ({ error } = await this.resend.emails.send({
         from: this.from,
         to,
         subject,
         text,
         html,
-      });
-    } catch (error) {
+      }));
+    } catch (err) {
+      error = err;
+    }
+
+    if (error) {
       this.logger.error(`Failed to send mail to ${to}`, error);
       throw new ServiceUnavailableException(
-        'The invitation email could not be sent. Try again or check SMTP settings.',
+        'The invitation email could not be sent. Try again or check Resend settings.',
       );
-    } finally {
-      transporter?.close();
     }
   }
 

@@ -114,16 +114,13 @@ KEYCLOAK_ISSUER=http://localhost:8180/realms/keycloak-demo
 KEYCLOAK_ADMIN_CLIENT_ID=keycloak-admin-service
 KEYCLOAK_ADMIN_CLIENT_SECRET=UMnoXBZMY6bJ4nJZTw3gZWSNfonUKiru
 APP_URL=http://localhost:5173
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
-SMTP_USER=
-SMTP_PASS=
+RESEND_API_KEY=
 MAIL_FROM=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 ```
 
-Invitation emails use SMTP (Gmail app password is fine for local testing). For invited Gmail users to sign in, add this Authorized redirect URI in Google Cloud Console, then set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` so the API can register a Google IDP in Keycloak:
+Invitation emails are sent through [Resend](https://resend.com). `MAIL_FROM` must use a domain verified in Resend (`onboarding@resend.dev` works for testing, but only delivers to your own Resend account email). For invited Gmail users to sign in, add this Authorized redirect URI in Google Cloud Console, then set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` so the API can register a Google IDP in Keycloak:
 
 ```text
 http://localhost:8180/realms/keycloak-demo/broker/google/endpoint
