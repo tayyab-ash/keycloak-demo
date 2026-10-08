@@ -1,0 +1,103 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ApiKeyStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  USER
+}
+
+enum UserStatus {
+  ACTIVE
+  DEACTIVATED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  REVOKED
+}
+
+enum InvitationType {
+  BOOTSTRAP
+  STANDARD
+}
+
+model ApiKey {
+  id        String       @id @default(cuid())
+  name      String
+  key       String       @unique
+  status    ApiKeyStatus @default(ACTIVE)
+  owner     String
+  ownerId   String
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@index([ownerId])
+  @@index([status])
+}
+
+model User {
+  id          String     @id @default(cuid())
+  keycloakSub String
+  issuer      String
+  email       String
+  name        String
+  role        UserRole
+  status      UserStatus @default(ACTIVE)
+  createdAt   DateTime   @default(now())
+  lastLoginAt DateTime?
+  updatedAt   DateTime   @updatedAt
+
+  invitationsSent     Invitation[] @relation("InvitedBy")
+  invitationsAccepted Invitation[] @relation("AcceptedBy")
+
+  @@unique([keycloakSub, issuer])
+  @@index([email])
+  @@index([status])
+}
+
+model Invitation {
+  id             String           @id @default(cuid())
+  email          String
+  role           UserRole
+  type           InvitationType   @default(STANDARD)
+  status         InvitationStatus @default(PENDING)
+  expiresAt      DateTime?
+  invitedById    String?
+  acceptedAt     DateTime?
+  acceptedUserId String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  invitedBy    User? @relation("InvitedBy", fields: [invitedById], references: [id])
+  acceptedUser User? @relation("AcceptedBy", fields: [acceptedUserId], references: [id])
+
+  @@index([email, status])
+  @@index([status])
+}
+
+model AuditEvent {
+  id        String   @id @default(cuid())
+  action    String
+  email     String?
+  actorId   String?
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([action])
+  @@index([createdAt])
+}
