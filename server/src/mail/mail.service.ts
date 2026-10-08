@@ -4,30 +4,54 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Resend } from 'resend';
+import { google, type gmail_v1 } from 'googleapis';
 import type { UserRole } from '../../generated/prisma/client';
+import { buildRawMimeMessage } from './mime';
+
+const SEND_TIMEOUT_MS = 15_000;
 
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
-  private readonly resend: Resend | null = null;
-  private readonly from: string | undefined;
+  private readonly gmail: gmail_v1.Gmail | null = null;
+  private readonly from: string | null = null;
   private readonly appUrl: string;
 
   constructor(private readonly configService: ConfigService) {
-    const apiKey = this.configService.get<string>('RESEND_API_KEY');
-    this.from = this.configService.get<string>('MAIL_FROM');
     this.appUrl =
       this.configService.get<string>('APP_URL') ?? 'http://localhost:5173';
 
-    if (!apiKey || !this.from) {
+    const config = {
+      GOOGLE_CLIENT_ID: this.env('GOOGLE_CLIENT_ID'),
+      GOOGLE_CLIENT_SECRET: this.env('GOOGLE_CLIENT_SECRET'),
+      GOOGLE_REFRESH_TOKEN: this.env('GOOGLE_REFRESH_TOKEN'),
+      GMAIL_USER: this.env('GMAIL_USER'),
+    };
+    const missing = Object.entries(config)
+      .filter(([, value]) => !value)
+      .map(([key]) => key);
+    if (missing.length > 0) {
       this.logger.warn(
-        'RESEND_API_KEY / MAIL_FROM are not set. Invitation emails will not be sent.',
+        `Gmail API mail is not configured (missing ${missing.join(', ')}). Invitation emails will not be sent.`,
       );
       return;
     }
 
-    this.resend = new Resend(apiKey);
+    const oauth2Client = new google.auth.OAuth2(
+      config.GOOGLE_CLIENT_ID,
+      config.GOOGLE_CLIENT_SECRET,
+    );
+    oauth2Client.setCredentials({ refresh_token: config.GOOGLE_REFRESH_TOKEN });
+
+    this.gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    this.from = this.env('MAIL_FROM') ?? config.GMAIL_USER!;
+
+    const fromAddress = /<([^<>\s]+)>\s*$/.exec(this.from)?.[1] ?? this.from;
+    if (fromAddress.toLowerCase() !== config.GMAIL_USER!.toLowerCase()) {
+      this.logger.warn(
+        `MAIL_FROM address (${fromAddress}) differs from GMAIL_USER (${config.GMAIL_USER}). Gmail will rewrite the From address unless it is a verified "Send mail as" alias on that account.`,
+      );
+    }
   }
 
   async sendInvite(params: {
@@ -75,31 +99,84 @@ export class MailService {
     text: string,
     html: string,
   ): Promise<void> {
-    if (!this.resend || !this.from) {
+    if (!this.gmail || !this.from) {
       throw new ServiceUnavailableException(
-        'Mail is not configured. Set RESEND_API_KEY and MAIL_FROM.',
+        'Mail is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN and GMAIL_USER.',
       );
     }
 
-    let error: unknown;
+    const raw = buildRawMimeMessage({
+      from: this.from,
+      to,
+      subject,
+      text,
+      html,
+    });
+
     try {
-      ({ error } = await this.resend.emails.send({
-        from: this.from,
-        to,
-        subject,
-        text,
-        html,
-      }));
-    } catch (err) {
-      error = err;
-    }
-
-    if (error) {
-      this.logger.error(`Failed to send mail to ${to}`, error);
+      const { data } = await this.gmail.users.messages.send(
+        { userId: 'me', requestBody: { raw } },
+        { timeout: SEND_TIMEOUT_MS },
+      );
+      this.logger.log(`Sent mail to ${to} (Gmail message id ${data.id})`);
+    } catch (error) {
+      // Never log the raw error: it carries request config with the bearer
+      // token and, for token refreshes, the client secret and refresh token.
+      this.logger.error(
+        `Failed to send mail to ${to} via Gmail API: ${this.describeGoogleError(error)}`,
+      );
       throw new ServiceUnavailableException(
-        'The invitation email could not be sent. Try again or check Resend settings.',
+        'The invitation email could not be sent. Try again or check the Gmail API settings.',
       );
     }
+  }
+
+  private env(key: string): string | undefined {
+    return this.configService.get<string>(key)?.trim() || undefined;
+  }
+
+  private describeGoogleError(error: unknown): string {
+    if (typeof error !== 'object' || error === null) {
+      return String(error);
+    }
+
+    const { response, code, message } = error as {
+      response?: { status?: number; data?: unknown };
+      code?: string | number;
+      message?: unknown;
+    };
+    const data = response?.data as
+      | {
+          error?: string | { status?: string; message?: string };
+          error_description?: string;
+        }
+      | undefined;
+
+    const parts: string[] = [];
+    if (response?.status) {
+      parts.push(`status=${response.status}`);
+    }
+    if (typeof data?.error === 'string') {
+      // OAuth token endpoint error, e.g. invalid_grant / invalid_client.
+      parts.push(`error=${data.error}`);
+      if (data.error_description) {
+        parts.push(`description="${data.error_description}"`);
+      }
+      if (data.error === 'invalid_grant') {
+        parts.push(
+          'hint="GOOGLE_REFRESH_TOKEN is invalid, expired or revoked. Generate a new one."',
+        );
+      }
+    } else if (data?.error) {
+      // Gmail API error.
+      if (data.error.status) parts.push(`reason=${data.error.status}`);
+      if (data.error.message) parts.push(`message="${data.error.message}"`);
+    } else {
+      if (code) parts.push(`code=${code}`);
+      if (typeof message === 'string') parts.push(`message="${message}"`);
+    }
+
+    return parts.length > 0 ? parts.join(' ') : 'unknown error';
   }
 
   private roleLabel(role: UserRole): string {
